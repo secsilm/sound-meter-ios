@@ -10,9 +10,22 @@
 		A100000000000000000000A5 /* SoundMeterIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SoundMeterIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A100000000000000000000B0 /* Exceptions for "SoundMeterIOS" folder in "SoundMeterIOS" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Resources/Info.plist,
+			);
+			target = A100000000000000000000A4 /* SoundMeterIOS */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A100000000000000000000AF /* SoundMeterIOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A100000000000000000000B0 /* Exceptions for "SoundMeterIOS" folder in "SoundMeterIOS" target */,
+			);
 			explicitFileTypes = {
 			};
 			explicitFolders = (
