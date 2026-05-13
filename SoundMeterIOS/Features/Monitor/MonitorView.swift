@@ -203,7 +203,7 @@ struct MonitorView: View {
 
 // MARK: - Glass card modifier
 
-private struct GlassCardModifier<S: Shape>: ViewModifier {
+private struct GlassCardModifier<S: InsettableShape>: ViewModifier {
     let shape: S
 
     @ViewBuilder
@@ -220,7 +220,7 @@ private struct GlassCardModifier<S: Shape>: ViewModifier {
 }
 
 private extension View {
-    func glassCard<S: Shape>(shape: S) -> some View {
+    func glassCard<S: InsettableShape>(shape: S) -> some View {
         modifier(GlassCardModifier(shape: shape))
     }
 }
