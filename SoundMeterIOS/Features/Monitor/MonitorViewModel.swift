@@ -8,18 +8,31 @@ final class MonitorViewModel: ObservableObject {
     @Published var sampleInterval: Double = 1.0
     @Published var shouldRecordAudio = false
     @Published var includeAudioInExport = false
-    @Published var session = RecordingSession(sampleInterval: 1.0, includesAudio: false)
-    @Published var exportedCSVURL: URL?
+    @Published private(set) var session = RecordingSession(sampleInterval: 1.0, includesAudio: false)
+    @Published private(set) var exportItems: [URL] = []
+    @Published var statusMessage: String?
 
     private let service: AudioMonitorServiceProtocol
     private let exporter = CSVExporter()
+
+    var canExport: Bool { !session.samples.isEmpty && !isRecording }
+    var hasAudioFile: Bool {
+        guard let url = session.audioFileURL else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
 
     init(service: AudioMonitorServiceProtocol = AudioMonitorService()) {
         self.service = service
         service.onSample = { [weak self] sample in
             Task { @MainActor in
-                self?.currentDecibel = sample.decibel
-                self?.session.samples.append(sample)
+                guard let self else { return }
+                self.currentDecibel = sample.decibel
+                self.session.samples.append(sample)
+            }
+        }
+        service.onInterruption = { [weak self] began in
+            Task { @MainActor in
+                self?.statusMessage = began ? "录音被打断，等待系统恢复…" : nil
             }
         }
     }
@@ -30,7 +43,8 @@ final class MonitorViewModel: ObservableObject {
 
     func start() {
         guard !isRecording else { return }
-
+        exportItems = []
+        statusMessage = nil
         session = RecordingSession(
             startedAt: .now,
             sampleInterval: sampleInterval,
@@ -48,7 +62,9 @@ final class MonitorViewModel: ObservableObject {
                     isRecording = true
                 }
             } catch {
-                print("Start monitoring failed: \(error.localizedDescription)")
+                await MainActor.run {
+                    statusMessage = "无法开始录制：\(error.localizedDescription)"
+                }
             }
         }
     }
@@ -56,19 +72,27 @@ final class MonitorViewModel: ObservableObject {
     func stop() {
         guard isRecording else { return }
         session.endedAt = .now
-        if shouldRecordAudio {
-            session.audioFileURL = service.stopMonitoring()
-        } else {
-            _ = service.stopMonitoring()
-        }
+        let url = service.stopMonitoring()
+        session.audioFileURL = shouldRecordAudio ? url : nil
         isRecording = false
     }
 
-    func exportCSV() {
+    func prepareExport() {
+        guard canExport else { return }
         do {
-            exportedCSVURL = try exporter.export(session: session)
+            var items: [URL] = []
+            items.append(try exporter.export(session: session))
+            if includeAudioInExport, shouldRecordAudio, hasAudioFile, let audio = session.audioFileURL {
+                items.append(audio)
+            }
+            exportItems = items
+            statusMessage = nil
         } catch {
-            print("CSV export failed: \(error.localizedDescription)")
+            statusMessage = "导出失败：\(error.localizedDescription)"
         }
+    }
+
+    func clearExports() {
+        exportItems = []
     }
 }

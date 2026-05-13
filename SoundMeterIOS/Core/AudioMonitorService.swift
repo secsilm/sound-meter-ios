@@ -1,8 +1,9 @@
 import AVFoundation
 import Foundation
 
-protocol AudioMonitorServiceProtocol {
+protocol AudioMonitorServiceProtocol: AnyObject {
     var onSample: ((NoiseSample) -> Void)? { get set }
+    var onInterruption: ((Bool) -> Void)? { get set }
     var isMonitoring: Bool { get }
 
     func startMonitoring(sampleInterval: TimeInterval, recordAudio: Bool) async throws -> URL?
@@ -11,24 +12,42 @@ protocol AudioMonitorServiceProtocol {
 
 final class AudioMonitorService: NSObject, AudioMonitorServiceProtocol {
     var onSample: ((NoiseSample) -> Void)?
+    var onInterruption: ((Bool) -> Void)?
     private(set) var isMonitoring: Bool = false
 
     private let session = AVAudioSession.sharedInstance()
     private var recorder: AVAudioRecorder?
+    private var recorderURL: URL?
     private var timer: DispatchSourceTimer?
+    private var currentRecordAudio = false
+
+    override init() {
+        super.init()
+        registerSessionNotifications()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
 
     func startMonitoring(sampleInterval: TimeInterval, recordAudio: Bool) async throws -> URL? {
-        try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth])
+        try session.setCategory(
+            .playAndRecord,
+            mode: .measurement,
+            options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers]
+        )
         try session.setActive(true, options: .notifyOthersOnDeactivation)
 
-        let outputURL = try prepareRecorderIfNeeded(recordAudio: recordAudio)
+        currentRecordAudio = recordAudio
+        let url = try prepareRecorder()
+        recorderURL = url
 
         recorder?.isMeteringEnabled = true
         recorder?.record()
 
         startSampling(sampleInterval: sampleInterval)
         isMonitoring = true
-        return outputURL
+        return recordAudio ? url : nil
     }
 
     func stopMonitoring() -> URL? {
@@ -36,31 +55,38 @@ final class AudioMonitorService: NSObject, AudioMonitorServiceProtocol {
         timer = nil
 
         recorder?.stop()
-        let savedURL = recorder?.url
+        let url = recorderURL
         recorder = nil
 
-        try? session.setActive(false)
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
         isMonitoring = false
-        return savedURL
+
+        if !currentRecordAudio, let url {
+            try? FileManager.default.removeItem(at: url)
+            recorderURL = nil
+            return nil
+        }
+        recorderURL = nil
+        return url
     }
 
     private func startSampling(sampleInterval: TimeInterval) {
         timer?.cancel()
 
-        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
-        timer.schedule(deadline: .now(), repeating: sampleInterval)
-        timer.setEventHandler { [weak self] in
-            guard let self, let recorder = self.recorder else { return }
+        let t = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        t.schedule(deadline: .now(), repeating: sampleInterval)
+        t.setEventHandler { [weak self] in
+            guard let self, let recorder = self.recorder, recorder.isRecording else { return }
             recorder.updateMeters()
-            let db = recorder.averagePower(forChannel: 0)
-            let normalized = Self.normalizeDecibel(db)
+            let raw = recorder.averagePower(forChannel: 0)
+            let normalized = Self.normalizeDecibel(raw)
             self.onSample?(NoiseSample(decibel: normalized))
         }
-        timer.resume()
-        self.timer = timer
+        t.resume()
+        self.timer = t
     }
 
-    private func prepareRecorderIfNeeded(recordAudio: Bool) throws -> URL? {
+    private func prepareRecorder() throws -> URL {
         let url = Self.makeAudioURL()
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
@@ -68,25 +94,71 @@ final class AudioMonitorService: NSObject, AudioMonitorServiceProtocol {
             AVNumberOfChannelsKey: 1,
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
         ]
-
-        let recorder = try AVAudioRecorder(url: url, settings: settings)
-        self.recorder = recorder
-
-        if !recordAudio {
-            try? FileManager.default.removeItem(at: url)
-            return nil
-        }
-
+        recorder = try AVAudioRecorder(url: url, settings: settings)
         return url
     }
 
     private static func makeAudioURL() -> URL {
-        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base.appendingPathComponent("noise-\(Int(Date().timeIntervalSince1970)).m4a")
+        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let ts = Int(Date().timeIntervalSince1970)
+        return base.appendingPathComponent("noise-\(ts).m4a")
     }
 
     private static func normalizeDecibel(_ db: Float) -> Double {
         let clamped = max(-80, min(0, db))
-        return Double(clamped + 100)
+        return Double(clamped) + 100.0
+    }
+
+    // MARK: - Session notifications
+
+    private func registerSessionNotifications() {
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(handleInterruption(_:)),
+                       name: AVAudioSession.interruptionNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleRouteChange(_:)),
+                       name: AVAudioSession.routeChangeNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleMediaServicesReset(_:)),
+                       name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
+    }
+
+    @objc private func handleInterruption(_ note: Notification) {
+        guard
+            let info = note.userInfo,
+            let raw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+            let type = AVAudioSession.InterruptionType(rawValue: raw)
+        else { return }
+
+        switch type {
+        case .began:
+            onInterruption?(true)
+        case .ended:
+            let opts = (info[AVAudioSessionInterruptionOptionKey] as? UInt)
+                .map { AVAudioSession.InterruptionOptions(rawValue: $0) } ?? []
+            guard opts.contains(.shouldResume), isMonitoring else { return }
+            do {
+                try session.setActive(true, options: .notifyOthersOnDeactivation)
+                recorder?.record()
+                onInterruption?(false)
+            } catch {
+                onInterruption?(true)
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    @objc private func handleRouteChange(_ note: Notification) {
+        guard isMonitoring, let recorder, !recorder.isRecording else { return }
+        recorder.record()
+    }
+
+    @objc private func handleMediaServicesReset(_ note: Notification) {
+        recorder?.stop()
+        recorder = nil
+        timer?.cancel()
+        timer = nil
+        isMonitoring = false
+        onInterruption?(true)
     }
 }
