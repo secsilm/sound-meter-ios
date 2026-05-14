@@ -33,8 +33,6 @@ struct MonitorView: View {
                 Text(String(format: "%.1f", viewModel.currentDecibel))
                     .font(.system(size: 76, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .contentTransition(.numericText(value: viewModel.currentDecibel))
-                    .animation(.snappy(duration: 0.25), value: viewModel.currentDecibel)
                 Text("dB")
                     .font(.title3.weight(.medium))
                     .foregroundStyle(.secondary)
